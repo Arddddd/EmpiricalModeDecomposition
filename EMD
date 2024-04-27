@@ -1,0 +1,92 @@
+import pandas as pd
+import numpy as np
+from PyEMD.EMD import EMD
+from PyEMD.visualisation import Visualisation
+import gc
+
+'''
+只使用imfs5 imfs6 imfs7三个周期
+趋势向上的时候做多，向下的时候空仓
+
+滞后期nday = 5,10,20
+例：若滞后期为一天，则看到信号第二天调仓
+'''
+
+'''##################################################### 数据准备 #####################################################'''
+
+# ### 历史数据 20110104-20220930 沪深300,中证500,中证1000,万得全A
+index_data = pd.read_excel(r"index_data.xlsx", skiprows=[1, 2, 3], index_col=0)
+index_data.index = index_data.index.strftime('%Y-%m-%d')
+pct_data = index_data.pct_change(1)
+index_data = index_data[(index_data.index >= "2010-01-01") & (index_data.index <= "2022-09-30")]
+
+
+def run_emd(index_name='中证1000', date1='2011-01-01', date2='2015-01-01', Num=5):
+    '''输出滤波'''
+    temp = index_data[(index_data.index >= date1) & (index_data.index < date2)].copy()
+    index_close = np.array(temp[index_name])
+    emd = EMD()
+    emd.emd(index_close)
+    imfs, res = emd.get_imfs_and_residue()
+    imfs_data = pd.DataFrame(imfs).T
+    imfs_data['date'] = temp.index
+    if imfs_data.shape[1] >= Num:  # 取第五条及之后滤波
+        imfs_data = imfs_data.iloc[:, 4:]
+        return imfs_data
+    else:
+        return None
+
+
+date_his = '2014-12-31'  # 样本内右端日期
+his_len = list(index_data.index).index(date_his)  # 样本内初始长度
+
+# ### 样本内从201101-201512开始逐日增加，样本外为20160108-（滞后期交易日最少为5天）
+df = pd.DataFrame()
+for d in range(his_len, len(index_data.index) - lags):
+    temp_data = run_emd('沪深300', date1='2011-01-01', date2=index_data.index[d])
+    temp_data['date_end'] = index_data.index[d]
+    print(index_data.index[d])
+    df = pd.concat([df, temp_data])
+
+# ### 各指数都跑一遍，生成四个h5文件备用
+zz1000 = pd.read_hdf(r'中证1000imfs.h5')
+zz500 = pd.read_hdf(r'中证500imfs.h5')
+hs300 = pd.read_hdf(r'沪深300imfs.h5')
+alla = pd.read_hdf(r'万得全Aimfs.h5')
+
+'''###################################################### 权重 #######################################################'''
+
+pct_data = pct_data.reset_index()
+pct_data.columns = ['date', '沪深300', '中证500', '中证1000', '万得全A']
+
+index_name = '中证1000'
+df = zz1000.copy()
+df['IMF5_diff1'] = df['IMF5'].diff(1)
+
+
+def get_last(df):
+    temp = df[df['date'] == df['date'].max()].copy()  # date是样本内右端日期
+    return temp
+
+
+df1 = df.groupby('date_end').apply(lambda x: get_last(x))
+df1 = df1.reset_index(drop=True)
+df1['diff1_lag5'] = df1['IMF5_diff1'].shift(5)
+df1['diff1_lag10'] = df1['IMF5_diff1'].shift(10)
+df1['diff1_lag20'] = df1['IMF5_diff1'].shift(20)
+
+df2 = df1.merge(pct_data, on='date', how='left')
+
+df2['lag5_weight'] = [1 if x > 0 else 0 for x in df2['diff1_lag5']]
+df2['lag10_weight'] = [1 if x > 0 else 0 for x in df2['diff1_lag10']]
+df2['lag20_weight'] = [1 if x > 0 else 0 for x in df2['diff1_lag20']]
+
+df2['lag5_return'] = df2['lag5_weight'] * df2[index_name]
+df2['lag10_return'] = df2['lag10_weight'] * df2[index_name]
+df2['lag20_return'] = df2['lag20_weight'] * df2[index_name]
+
+df2['lag5_value'] = np.cumprod(1 + df2['lag5_return'])
+df2['lag10_value'] = np.cumprod(1 + df2['lag10_return'])
+df2['lag20_value'] = np.cumprod(1 + df2['lag20_return'])
+
+df2.to_excel(index_name + '回测.xlsx', index=False)
